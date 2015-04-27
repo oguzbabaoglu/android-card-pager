@@ -57,6 +57,8 @@ public class CardPager extends ViewGroup {
     private static final int DEFAULT_OFFSCREEN_PAGES = 1;
     private static final int MAX_SETTLE_DURATION = 600; // ms
     private static final int MIN_DISTANCE_FOR_FLING = 25; // dp
+    private static final int SMOOTH_SCROLL_FACTOR = 4;
+    private static final float SNAP_FACTOR = .3f;
 
     // Minimum fling velocity is larger than of ViewPager.
     // We want to minimize accidental swipes, there is no way of going back.
@@ -89,6 +91,7 @@ public class CardPager extends ViewGroup {
     private Scroller scroller;
     private PagerAdapter pagerAdapter;
     private PagerObserver pagerObserver;
+    private OnCardChangeListener onCardChangeListener;
 
     private ArrayList<View> drawingOrderedChildren;
 
@@ -108,7 +111,7 @@ public class CardPager extends ViewGroup {
         }
     };
 
-    private static final Interpolator sInterpolator = new Interpolator() {
+    private static final Interpolator INTERPOLATOR = new Interpolator() {
         public float getInterpolation(float t) {
             t -= 1.0f;
             return t * t * t * t * t + 1.0f;
@@ -143,7 +146,7 @@ public class CardPager extends ViewGroup {
     private float initialMotionY;
 
     /**
-     * Determines speed during touch scrolling
+     * Determines speed during touch scrolling.
      */
     private VelocityTracker velocityTracker;
     private int minimumVelocity;
@@ -176,9 +179,72 @@ public class CardPager extends ViewGroup {
 
     private int scrollState = SCROLL_STATE_IDLE;
 
+    /**
+     * Callback interface for responding to changing state of the selected page.
+     */
+    public interface OnCardChangeListener {
+
+        /**
+         * This method will be invoked when the current page is scrolled, either as part
+         * of a programmatically initiated smooth scroll or a user initiated touch scroll.
+         *
+         * @param position             Position index of the page currently being displayed.
+         *                             Page position+1 will be visible if positionOffset is nonzero.
+         * @param positionOffset       Value from [-1, 1) indicating the offset from the page at position.
+         * @param positionOffsetPixels Value in pixels indicating the offset from position.
+         */
+        void onCardScrolled(int position, float positionOffset, int positionOffsetPixels);
+
+        /**
+         * This method will be invoked when the current page is dismissed. Animation is not
+         * necessarily complete.
+         *
+         * @param position Position index of the dismissed page.
+         * @param right    True if dismissed from the right side, false otherwise.
+         */
+        void onCardDismissed(int position, boolean right);
+
+        /**
+         * Called when the scroll state changes. Useful for discovering when the user
+         * begins dragging, when the pager is automatically settling to the current page,
+         * or when it is fully stopped/idle.
+         *
+         * @param state The new scroll state.
+         * @see CardPager#SCROLL_STATE_IDLE
+         * @see CardPager#SCROLL_STATE_DRAGGING
+         * @see CardPager#SCROLL_STATE_SETTLING
+         */
+        void onCardScrollStateChanged(int state);
+    }
+
+    /**
+     * Simple implementation of the {@link OnCardChangeListener} interface with stub
+     * implementations of each method. Extend this if you do not intend to override
+     * every method of {@link OnCardChangeListener}.
+     */
+    public static class SimpleOnCardChangeListener implements OnCardChangeListener {
+        @Override
+        public void onCardScrolled(int position, float positionOffset, int positionOffsetPixels) {
+            // This space for rent
+        }
+
+        @Override
+        public void onCardDismissed(int position, boolean right) {
+            // This space for rent
+        }
+
+        @Override
+        public void onCardScrollStateChanged(int state) {
+            // This space for rent
+        }
+    }
+
     private final ArrayList<ItemInfo> items = new ArrayList<>();
     private final ItemInfo tempItem = new ItemInfo();
 
+    /**
+     * Holds info about page.
+     */
     static class ItemInfo {
         Object object;
         int position;
@@ -208,7 +274,7 @@ public class CardPager extends ViewGroup {
         final ViewConfiguration configuration = ViewConfiguration.get(context);
 
         density = context.getResources().getDisplayMetrics().density;
-        scroller = new Scroller(context, sInterpolator);
+        scroller = new Scroller(context, INTERPOLATOR);
 
         touchSlop = ViewConfigurationCompat.getScaledPagingTouchSlop(configuration);
         maximumVelocity = configuration.getScaledMaximumFlingVelocity();
@@ -230,12 +296,22 @@ public class CardPager extends ViewGroup {
         return ((LayoutParams) drawingOrderedChildren.get(index).getLayoutParams()).childIndex;
     }
 
+    /**
+     * Set scroll state. Will enable hardware layers in children if there is motion.
+     *
+     * @param newState new state
+     */
     private void setScrollState(int newState) {
         if (scrollState == newState) {
             return;
         }
 
         scrollState = newState;
+
+        if (onCardChangeListener != null) {
+            onCardChangeListener.onCardScrollStateChanged(newState);
+        }
+
         enableLayers(newState != SCROLL_STATE_IDLE);
     }
 
@@ -256,7 +332,6 @@ public class CardPager extends ViewGroup {
             items.clear();
             removeCardViews();
             currentItem = 0;
-            virtualPos = 0;
             scrollTo(0, 0);
         }
 
@@ -285,6 +360,9 @@ public class CardPager extends ViewGroup {
         }
     }
 
+    /**
+     * Remove all child views.
+     */
     private void removeCardViews() {
         for (int i = 0; i < getChildCount(); i++) {
             removeViewAt(i);
@@ -301,6 +379,9 @@ public class CardPager extends ViewGroup {
         return pagerAdapter;
     }
 
+    /**
+     * @return content width
+     */
     private int getClientWidth() {
         return getMeasuredWidth() - getPaddingLeft() - getPaddingRight();
     }
@@ -348,8 +429,7 @@ public class CardPager extends ViewGroup {
         final ItemInfo curInfo = infoForPosition(item);
         int destX = 0;
         if (curInfo != null) {
-            final int width = getClientWidth();
-            destX = (int) (width * Math.max(firstOffset, Math.min(curInfo.offset, lastOffset)));
+            destX = (int) (getClientWidth() * Math.max(firstOffset, Math.min(curInfo.offset, lastOffset)));
         }
         if (smoothScroll) {
             smoothScrollTo(destX, 0, velocity);
@@ -361,13 +441,22 @@ public class CardPager extends ViewGroup {
         }
     }
 
-    // We want the duration of the page snap animation to be influenced by the distance that
-    // the screen has to travel, however, we don't want this duration to be effected in a
-    // purely linear fashion. Instead, we use this method to moderate the effect that the distance
-    // of travel has on the overall snap duration.
+    public void setOnCardChangeListener(OnCardChangeListener onCardChangeListener) {
+        this.onCardChangeListener = onCardChangeListener;
+    }
+
+    /**
+     * We want the duration of the page snap animation to be influenced by the distance that
+     * the screen has to travel, however, we don't want this duration to be effected in a
+     * purely linear fashion. Instead, we use this method to moderate the effect that the distance
+     * of travel has on the overall snap duration.
+     *
+     * @param f unmodified distance factor
+     * @return modified distance factor
+     */
     float distanceInfluenceForSnapDuration(float f) {
         f -= 0.5f; // center the values about 0.
-        f *= 0.3f * Math.PI / 2.0f;
+        f *= SNAP_FACTOR * Math.PI / 2.0f;
         return (float) Math.sin(f);
     }
 
@@ -383,10 +472,10 @@ public class CardPager extends ViewGroup {
             // Nothing to do.
             return;
         }
-        int sx = getScrollX();
-        int sy = getScrollY();
-        int dx = x - sx;
-        int dy = y - sy;
+        final int sx = getScrollX();
+        final int sy = getScrollY();
+        final int dx = x - sx;
+        final int dy = y - sy;
         if (dx == 0 && dy == 0) {
             completeScroll(false);
             populate();
@@ -404,7 +493,7 @@ public class CardPager extends ViewGroup {
         int duration;
         velocity = Math.abs(velocity);
         if (velocity > 0) {
-            duration = 4 * Math.round(1000 * Math.abs(distance / velocity));
+            duration = SMOOTH_SCROLL_FACTOR * Math.round(1000 * Math.abs(distance / velocity));
         } else {
             final float pageWidth = width * pagerAdapter.getPageWidth(currentItem);
             final float pageDelta = (float) Math.abs(dx) / pageWidth;
@@ -417,7 +506,7 @@ public class CardPager extends ViewGroup {
     }
 
     ItemInfo addNewItem(int position, int index) {
-        ItemInfo ii = new ItemInfo();
+        final ItemInfo ii = new ItemInfo();
         ii.position = position;
         ii.object = pagerAdapter.instantiateItem(this, position);
         ii.widthFactor = pagerAdapter.getPageWidth(position);
@@ -433,8 +522,7 @@ public class CardPager extends ViewGroup {
         // This method only gets called if our observer is attached, so pagerAdapter is non-null.
 
         final int adapterCount = pagerAdapter.getCount();
-        boolean needPopulate = items.size() < offscreenPageLimit * 2 + 1 &&
-                items.size() < adapterCount;
+        boolean needPopulate = items.size() < offscreenPageLimit * 2 + 1 && items.size() < adapterCount;
         int newCurrItem = currentItem;
 
         boolean isUpdating = false;
@@ -508,7 +596,6 @@ public class CardPager extends ViewGroup {
             focusDirection = currentItem < newCurrentItem ? View.FOCUS_RIGHT : View.FOCUS_LEFT;
             oldCurInfo = infoForPosition(currentItem);
             currentItem = newCurrentItem;
-            virtualPos = 0;
         }
 
         if (pagerAdapter == null) {
@@ -536,8 +623,8 @@ public class CardPager extends ViewGroup {
 
         final int pageLimit = offscreenPageLimit;
         final int startPos = Math.max(0, currentItem - pageLimit);
-        final int N = pagerAdapter.getCount();
-        final int endPos = Math.min(N - 1, currentItem + pageLimit);
+        final int adapterCount = pagerAdapter.getCount();
+        final int endPos = Math.min(adapterCount - 1, currentItem + pageLimit);
 
         // Locate the currently focused item or add it if needed.
         int curIndex;
@@ -550,7 +637,7 @@ public class CardPager extends ViewGroup {
             }
         }
 
-        if (curItem == null && N > 0) {
+        if (curItem == null && adapterCount > 0) {
             curItem = addNewItem(currentItem, curIndex);
         }
 
@@ -562,8 +649,8 @@ public class CardPager extends ViewGroup {
             int itemIndex = curIndex - 1;
             ItemInfo ii = itemIndex >= 0 ? items.get(itemIndex) : null;
             final int clientWidth = getClientWidth();
-            final float leftWidthNeeded = clientWidth <= 0 ? 0 :
-                    2.f - curItem.widthFactor + (float) getPaddingLeft() / (float) clientWidth;
+            final float leftWidthNeeded = clientWidth <= 0 ? 0
+                    : 2.f - curItem.widthFactor + (float) getPaddingLeft() / (float) clientWidth;
             for (int pos = currentItem - 1; pos >= 0; pos--) {
                 if (extraWidthLeft >= leftWidthNeeded && pos < startPos) {
                     if (ii == null) {
@@ -593,9 +680,9 @@ public class CardPager extends ViewGroup {
             itemIndex = curIndex + 1;
             if (extraWidthRight < 2.f) {
                 ii = itemIndex < items.size() ? items.get(itemIndex) : null;
-                final float rightWidthNeeded = clientWidth <= 0 ? 0 :
-                        (float) getPaddingRight() / (float) clientWidth + 2.f;
-                for (int pos = currentItem + 1; pos < N; pos++) {
+                final float rightWidthNeeded = clientWidth <= 0 ? 0
+                        : (float) getPaddingRight() / (float) clientWidth + 2.f;
+                for (int pos = currentItem + 1; pos < adapterCount; pos++) {
                     if (extraWidthRight >= rightWidthNeeded && pos > endPos) {
                         if (ii == null) {
                             break;
@@ -644,6 +731,15 @@ public class CardPager extends ViewGroup {
         }
 
         sortChildDrawingOrder();
+        checkFocus(focusDirection);
+    }
+
+    /**
+     * Check if child needs focus.
+     *
+     * @param focusDirection focusDirection
+     */
+    private void checkFocus(int focusDirection) {
 
         if (hasFocus()) {
             View currentFocused = findFocus();
@@ -662,6 +758,9 @@ public class CardPager extends ViewGroup {
         }
     }
 
+    /**
+     * Sorts children in reverse order for drawing.
+     */
     private void sortChildDrawingOrder() {
 
         if (drawingOrderedChildren == null) {
@@ -678,7 +777,12 @@ public class CardPager extends ViewGroup {
     }
 
     private void calculatePageOffsets(ItemInfo curItem, int curIndex, ItemInfo oldCurInfo) {
-        final int N = pagerAdapter.getCount();
+
+        if (pagerAdapter == null) {
+            return;
+        }
+
+        final int adapterCount = pagerAdapter.getCount();
         final float marginOffset = 0;
         // Fix up offsets for later layout.
         if (oldCurInfo != null) {
@@ -732,8 +836,9 @@ public class CardPager extends ViewGroup {
         float offset = curItem.offset;
         int pos = curItem.position - 1;
         firstOffset = curItem.position == 0 ? curItem.offset : -Float.MAX_VALUE;
-        lastOffset = curItem.position == N - 1 ?
-                curItem.offset + curItem.widthFactor - 1 : Float.MAX_VALUE;
+        lastOffset = curItem.position == adapterCount - 1
+                ? curItem.offset + curItem.widthFactor - 1
+                : Float.MAX_VALUE;
         // Previous pages
         for (int i = curIndex - 1; i >= 0; i--, pos--) {
             final ItemInfo ii = items.get(i);
@@ -742,7 +847,9 @@ public class CardPager extends ViewGroup {
             }
             offset -= ii.widthFactor + marginOffset;
             ii.offset = offset;
-            if (ii.position == 0) firstOffset = offset;
+            if (ii.position == 0) {
+                firstOffset = offset;
+            }
         }
         offset = curItem.offset + curItem.widthFactor + marginOffset;
         pos = curItem.position + 1;
@@ -752,7 +859,7 @@ public class CardPager extends ViewGroup {
             while (pos < ii.position) {
                 offset += pagerAdapter.getPageWidth(pos++) + marginOffset;
             }
-            if (ii.position == N - 1) {
+            if (ii.position == adapterCount - 1) {
                 lastOffset = offset + ii.widthFactor - 1;
             }
             ii.offset = offset;
@@ -884,8 +991,7 @@ public class CardPager extends ViewGroup {
         } else {
             final ItemInfo ii = infoForPosition(currentItem);
             final float scrollOffset = ii != null ? Math.min(ii.offset, lastOffset) : 0;
-            final int scrollPos = (int) (scrollOffset *
-                    (width - getPaddingLeft() - getPaddingRight()));
+            final int scrollPos = (int) (scrollOffset * (width - getPaddingLeft() - getPaddingRight()));
             if (scrollPos != getScrollX()) {
                 completeScroll(false);
                 scrollTo(scrollPos, getScrollY());
@@ -973,6 +1079,21 @@ public class CardPager extends ViewGroup {
         completeScroll(true);
     }
 
+    @Override
+    protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+        super.onScrollChanged(l, t, oldl, oldt);
+
+        if (l == getClientWidth() * currentItem) {
+            virtualPos = 0;
+        }
+    }
+
+    /**
+     * Called when page is scrolled. Updates virtualPos of page according to scroll position.
+     *
+     * @param xPos xPos
+     * @return true if scrolled
+     */
     private boolean pageScrolled(int xPos) {
 
         if (items.size() == 0) {
@@ -985,6 +1106,13 @@ public class CardPager extends ViewGroup {
                 : virtualPos - deltaScroll;
         lastScroll = xPos;
 
+        final int width = getClientWidth();
+        final float pageOffset = virtualPos / width;
+
+        if (onCardChangeListener != null) {
+            onCardChangeListener.onCardScrolled(currentItem, pageOffset, (int) virtualPos);
+        }
+
         onPageScrolled();
 
         return true;
@@ -994,7 +1122,7 @@ public class CardPager extends ViewGroup {
      * This method will be invoked when the current page is scrolled, either as part
      * of a programmatically initiated smooth scroll or a user initiated touch scroll.
      */
-    private void onPageScrolled() {
+    protected void onPageScrolled() {
 
         final int scrollX = getScrollX();
         final int childCount = getChildCount();
@@ -1056,6 +1184,11 @@ public class CardPager extends ViewGroup {
         }
     }
 
+    /**
+     * Complete a scroll in progress.
+     *
+     * @param postEvents whether endScroll runnable should wait for animation to complete
+     */
     private void completeScroll(boolean postEvents) {
         boolean needPopulate = scrollState == SCROLL_STATE_SETTLING;
         if (needPopulate) {
@@ -1067,6 +1200,9 @@ public class CardPager extends ViewGroup {
             int y = scroller.getCurrY();
             if (oldX != x || oldY != y) {
                 scrollTo(x, y);
+                if (x != oldX) {
+                    pageScrolled(x);
+                }
             }
         }
         populatePending = false;
@@ -1083,10 +1219,14 @@ public class CardPager extends ViewGroup {
             } else {
                 endScrollRunnable.run();
             }
-            virtualPos = 0;
         }
     }
 
+    /**
+     * Enable or disable hardware layers for drawing in children.
+     *
+     * @param enable enable
+     */
     private void enableLayers(boolean enable) {
         final int childCount = getChildCount();
         for (int i = 0; i < childCount; i++) {
@@ -1137,7 +1277,7 @@ public class CardPager extends ViewGroup {
         }
 
         switch (action) {
-            case MotionEvent.ACTION_MOVE: {
+            case MotionEvent.ACTION_MOVE:
                 /*
                  * dragInProgress == false, otherwise the shortcut would have caught it. Check
                  * whether the user has moved far enough from his original down touch.
@@ -1164,8 +1304,9 @@ public class CardPager extends ViewGroup {
                     dragInProgress = true;
                     requestParentDisallowInterceptTouchEvent(true);
                     setScrollState(SCROLL_STATE_DRAGGING);
-                    lastMotionX = dx > 0 ? initialMotionX + touchSlop :
-                            initialMotionX - touchSlop;
+                    lastMotionX = dx > 0
+                            ? initialMotionX + touchSlop
+                            : initialMotionX - touchSlop;
                     lastMotionY = y;
 
                 } else if (yDiff > touchSlop) {
@@ -1180,20 +1321,23 @@ public class CardPager extends ViewGroup {
                     performDrag(x);
                 }
                 break;
-            }
 
-            case MotionEvent.ACTION_DOWN: {
+            case MotionEvent.ACTION_DOWN:
                 /*
                  * Remember location of down touch.
                  * ACTION_DOWN always refers to pointer index 0.
                  */
                 lastMotionX = initialMotionX = ev.getX();
                 lastMotionY = initialMotionY = ev.getY();
-                activePointerId = MotionEventCompat.getPointerId(ev, 0);
+                this.activePointerId = MotionEventCompat.getPointerId(ev, 0);
                 unableToDrag = false;
 
-                if (scrollState == SCROLL_STATE_SETTLING && Math.abs(virtualPos) * density < catchAllowance) {
+                double scroll = getScrollX() / getClientWidth();
+
+                if (scrollState == SCROLL_STATE_SETTLING && scroll * density < catchAllowance) {
                     // Let the user 'catch' the pager as it animates.
+                    populatePending = false;
+                    populate();
                     dragInProgress = true;
                     requestParentDisallowInterceptTouchEvent(true);
                     setScrollState(SCROLL_STATE_DRAGGING);
@@ -1201,7 +1345,6 @@ public class CardPager extends ViewGroup {
                     dragInProgress = false;
                 }
                 break;
-            }
 
             case MotionEventCompat.ACTION_POINTER_UP:
                 onSecondaryPointerUp(ev);
@@ -1347,6 +1490,11 @@ public class CardPager extends ViewGroup {
         }
     }
 
+    /**
+     * Perform a user initiated drag motion. Does not allow scrolling backward.
+     *
+     * @param x scroll x
+     */
     private void performDrag(float x) {
 
         float deltaX = lastMotionX - x;
@@ -1444,6 +1592,11 @@ public class CardPager extends ViewGroup {
         return lastItem;
     }
 
+    /**
+     * Figure out what the target page would be given current scroll and velocity.
+     *
+     * @return target page
+     */
     private int determineTargetPage(int currentPage, float pageOffset, int velocity, int deltaX) {
         int targetPage;
         if (Math.abs(deltaX) > flingDistance && Math.abs(velocity) > minimumVelocity) {
@@ -1467,9 +1620,18 @@ public class CardPager extends ViewGroup {
             targetPage = Math.max(firstItem.position, Math.min(targetPage, lastItem.position));
         }
 
+        if (targetPage > currentPage && onCardChangeListener != null) {
+            onCardChangeListener.onCardDismissed(currentPage, virtualPos > 0);
+        }
+
         return targetPage;
     }
 
+    /**
+     * Check whether active pointer is up and re assign accordingly.
+     *
+     * @param ev motion event
+     */
     private void onSecondaryPointerUp(MotionEvent ev) {
         final int pointerIndex = MotionEventCompat.getActionIndex(ev);
         final int pointerId = MotionEventCompat.getPointerId(ev, pointerIndex);
@@ -1527,8 +1689,8 @@ public class CardPager extends ViewGroup {
             if (!isFocusable()) {
                 return;
             }
-            if ((focusableMode & FOCUSABLES_TOUCH_MODE) == FOCUSABLES_TOUCH_MODE &&
-                    isInTouchMode() && !isFocusableInTouchMode()) {
+            if ((focusableMode & FOCUSABLES_TOUCH_MODE) == FOCUSABLES_TOUCH_MODE
+                    && isInTouchMode() && !isFocusableInTouchMode()) {
                 return;
             }
             views.add(this);
@@ -1624,7 +1786,7 @@ public class CardPager extends ViewGroup {
     public static class LayoutParams extends ViewGroup.LayoutParams {
 
         /**
-         * Width as a 0-1 multiplier of the measured pager width
+         * Width as a 0-1 multiplier of the measured pager width.
          */
         float widthFactor = 0.f;
 
@@ -1635,12 +1797,12 @@ public class CardPager extends ViewGroup {
         boolean needsMeasure;
 
         /**
-         * Adapter position this view
+         * Adapter position this view.
          */
         int position;
 
         /**
-         * Current child index within the CardPager that this view occupies
+         * Current child index within the CardPager that this view occupies.
          */
         int childIndex;
 
