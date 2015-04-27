@@ -386,6 +386,26 @@ public class CardPager extends ViewGroup {
         return getMeasuredWidth() - getPaddingLeft() - getPaddingRight();
     }
 
+    /**
+     * Dismiss the current card.
+     *
+     * @param exitRight True to scroll page to the right
+     */
+    public void dismissCard(boolean exitRight) {
+
+        if (onCardChangeListener != null) {
+            onCardChangeListener.onCardDismissed(currentItem, exitRight);
+        }
+
+        populatePending = false;
+        reversePos = exitRight;
+        setCurrentItemInternal(currentItem + 1, true, false);
+    }
+
+    public int getCurrentItem() {
+        return currentItem;
+    }
+
     void setCurrentItemInternal(int item, boolean smoothScroll, boolean always) {
         setCurrentItemInternal(item, smoothScroll, always, 0);
     }
