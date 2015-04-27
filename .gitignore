@@ -17,3 +17,4 @@ config/
 
 # Porperties Files
 local.properties
+credential.properties
