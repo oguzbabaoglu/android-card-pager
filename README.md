@@ -1,3 +1,5 @@
+[![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.oguzbabaoglu/cardpager/badge.svg)](https://maven-badges.herokuapp.com/maven-central/com.oguzbabaoglu/cardpager)
+
 CardPager
 =========
 A modified ViewPager that behaves like a card stack.
