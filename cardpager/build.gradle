@@ -17,23 +17,28 @@
 apply plugin: 'com.android.library'
 
 android {
-    compileSdkVersion 22
-    buildToolsVersion "22.0.1"
+  compileSdkVersion 23
+  buildToolsVersion "23.0.2"
 
-    defaultConfig {
-        minSdkVersion 11
-        targetSdkVersion 22
-        versionCode 1
-        versionName "1.0"
-    }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_1_7
+    targetCompatibility JavaVersion.VERSION_1_7
+  }
 
-    lintOptions {
-        abortOnError false
-    }
+  defaultConfig {
+    minSdkVersion 11
+    targetSdkVersion 23
+    versionCode 1
+    versionName "1.0"
+  }
+
+  lintOptions {
+    abortOnError false
+  }
 }
 
 dependencies {
-    compile 'com.android.support:support-v4:22.1.0'
+  compile 'com.android.support:support-v4:23.1.1'
 }
 
 apply from: '../maven.gradle'
